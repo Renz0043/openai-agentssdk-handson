@@ -8,6 +8,16 @@ from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDel
 
 from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, trace,Agent, FunctionTool, RunContextWrapper, function_tool
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+from agents import set_default_openai_key
+
+set_default_openai_key(OPENAI_API_KEY)
+
 """
 このサンプルは、ハンドオフ/ルーティングパターンを示しています。トリアージエージェントが最初のメッセージを受け取り、
 その後、リクエストに基づいて適切なエージェントにハンドオフします。応答はユーザーにストリーミングされます。
@@ -27,7 +37,7 @@ async def query_data(date_range_from: str, date_range_to: str) -> str:
         data_range_to: 抽出対象となるデータの終了日。yyyy-mm-dd形式で渡される。
     """
 
-    df = pd.read_csv('landingpage_data.csv')
+    df = pd.read_csv('openai-agentssdk-handson/landingpage_data.csv')
 
     # 日付でクエリを実行（例として '2025/01/01' で絞り込み）
     query = f"SELECT * FROM df WHERE date BETWEEN '{date_range_from}' AND '{date_range_to}'"

@@ -37,7 +37,7 @@ async def query_data(date_range_from: str, date_range_to: str) -> str:
         data_range_to: 抽出対象となるデータの終了日。yyyy-mm-dd形式で渡される。
     """
 
-    df = pd.read_csv('openai-agentssdk-handson/landingpage_data.csv')
+    df = pd.read_csv('landingpage_data.csv')
 
     # 日付でクエリを実行（例として '2025/01/01' で絞り込み）
     query = f"SELECT * FROM df WHERE date BETWEEN '{date_range_from}' AND '{date_range_to}'"
@@ -62,7 +62,7 @@ content_agent = Agent(
 querydata_agent = Agent(
     model="gpt-4o-mini",
     name="querydata_agent",
-    instructions="あなたは優秀なインフラエンジニアです。自社が運用しているwebサイトのデータをクエリ、加工した結果の表をマークダウン形式ですべて省略せずに出力します。",
+    instructions="あなたは優秀なインフラエンジニアです。自社が運用しているwebサイトのデータをクエリ、加工した結果の表をマークダウン形式ですべて省略せずに出力します。ユーザーの入力からクエリ対象期間の開始日と終了日をyyyy-mm-dd形式で抽出してツールを利用します。",
     tools=[query_data],
     handoffs=[dataAnalyst_agent, content_agent],
 )

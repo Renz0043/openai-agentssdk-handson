@@ -11,7 +11,7 @@ from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, t
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+load_dotenv('.env')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 from agents import set_default_openai_key

@@ -4,9 +4,23 @@ import pandas as pd
 from pandasql import sqldf
 from dataclasses import dataclass
 
+from pydantic import BaseModel
+
 from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
 
-from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, trace,Agent, FunctionTool, RunContextWrapper, function_tool
+from agents import (
+    Agent,
+    FunctionTool,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
+    RawResponsesStreamEvent,
+    RunContextWrapper,
+    Runner,
+    TResponseInputItem,
+    function_tool,
+    input_guardrail,
+    trace
+)
 
 from dotenv import load_dotenv
 import os
@@ -47,6 +61,28 @@ async def query_data(date_range_from: str, date_range_to: str) -> str:
     # DataFrameのto_markdownメソッドを利用（pandas 1.0以降で利用可能）
     return result.to_markdown(index=False)
 
+class BusinessTopicOutput(BaseModel):
+    is_business_topic: bool
+    reasoning: str
+
+guardrail_agent = Agent( 
+    name="Guardrail check",
+    instructions="BtoBマーケティングにおけるデータ分析やSEOに関する話題かどうかチェックします。",
+    output_type=BusinessTopicOutput,
+)
+
+@input_guardrail
+async def businessTopic_guardrail( 
+    ctx: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    result = await Runner.run(guardrail_agent, input, context=ctx.context)
+
+    return GuardrailFunctionOutput(
+        output_info=result.final_output, 
+        tripwire_triggered=result.final_output.is_business_topic,
+    )
+
+# エージェントの定義
 dataAnalyst_agent = Agent(
     model="gpt-4o-mini",
     name="dataAnalyst_agent",
@@ -72,6 +108,7 @@ triage_agent = Agent(
     name="triage_agent",
     instructions="ユーザーからの内容に対して、適切なエージェントにハンドオフする",
     handoffs=[dataAnalyst_agent, content_agent, querydata_agent],
+    input_guardrails=[businessTopic_guardrail],
 )
 
 
@@ -109,32 +146,35 @@ async def main():
     agent = triage_agent
     inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
-    while True:
-        # 各会話のターンは単一のトレースとなります。通常、ユーザーからの各入力は
-        # あなたのアプリへのAPIリクエストとなり、それをtrace()でラップすることができます
-        with trace("Routing example", group_id=conversation_id):
-            result = Runner.run_streamed(
-                agent,
-                input=inputs,
-                context=user_info,
-            )
-            async for event in result.stream_events():
-                if not isinstance(event, RawResponsesStreamEvent):
-                    continue
-                data = event.data
-                if isinstance(data, ResponseTextDeltaEvent):
-                    print(data.delta, end="", flush=True)
-                elif isinstance(data, ResponseContentPartDoneEvent):
-                    print("\n")
+    try: 
+        while True:
+                # 各会話のターンは単一のトレースとなります。通常、ユーザーからの各入力は
+                # あなたのアプリへのAPIリクエストとなり、それをtrace()でラップすることができます
+                with trace("Routing example", group_id=conversation_id):
+                    result = Runner.run_streamed(
+                        agent,
+                        input=inputs,
+                        context=user_info,
+                    )
+                    async for event in result.stream_events():
+                        if not isinstance(event, RawResponsesStreamEvent):
+                            continue
+                        data = event.data
+                        if isinstance(data, ResponseTextDeltaEvent):
+                            print(data.delta, end="", flush=True)
+                        elif isinstance(data, ResponseContentPartDoneEvent):
+                            print("\n")
 
-        inputs = result.to_input_list()
-        print("\n")
+                inputs = result.to_input_list()
+                print("\n")
 
-        user_msg = input("更に話したいことがあれば教えて下さい: ")
-        inputs.append({"content": user_msg, "role": "user"})
-        # 都度トリアージに設定し直す
-        #agent = result.current_agent
-        agent = triage_agent
+                user_msg = input("更に話したいことがあれば教えて下さい: ")
+                inputs.append({"content": user_msg, "role": "user"})
+                # 都度トリアージに設定し直す
+                #agent = result.current_agent
+                agent = triage_agent
+    except InputGuardrailTripwireTriggered: #####ここでエラーをキャッチできない。。。。。
+        print("ビジネス以外の質問をしていせんか？")
 
 
 if __name__ == "__main__":

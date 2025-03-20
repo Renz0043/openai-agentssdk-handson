@@ -1,4 +1,4 @@
-#!/Users/suzukiren/openai-agentsdk-pj/openai-agentssdk-handson/.venv/bin/python
+#!/Users/ren/openai-agentssdk-project/.venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys

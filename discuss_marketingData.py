@@ -22,14 +22,16 @@ from agents import (
     trace
 )
 
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
-load_dotenv('.env')
+# .envファイルを読み込む
+load_dotenv()
+
+# 環境変数からAPIキーを取得
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-
+# デフォルトキーとして登録
 from agents import set_default_openai_key
-
 set_default_openai_key(OPENAI_API_KEY)
 
 """
@@ -67,7 +69,7 @@ class BusinessTopicOutput(BaseModel):
 
 guardrail_agent = Agent( 
     name="Guardrail check",
-    instructions="BtoBマーケティングにおけるデータ分析やSEOに関する話題かどうかチェックします。",
+    instructions="BtoBマーケティングにおけるデータ分析またはSEOに関するノウハウ以外を質問されていないかチェックする。",
     output_type=BusinessTopicOutput,
 )
 
@@ -108,7 +110,6 @@ triage_agent = Agent(
     name="triage_agent",
     instructions="ユーザーからの内容に対して、適切なエージェントにハンドオフする",
     handoffs=[dataAnalyst_agent, content_agent, querydata_agent],
-    input_guardrails=[businessTopic_guardrail],
 )
 
 
@@ -146,35 +147,32 @@ async def main():
     agent = triage_agent
     inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
-    try: 
-        while True:
-                # 各会話のターンは単一のトレースとなります。通常、ユーザーからの各入力は
-                # あなたのアプリへのAPIリクエストとなり、それをtrace()でラップすることができます
-                with trace("Routing example", group_id=conversation_id):
-                    result = Runner.run_streamed(
-                        agent,
-                        input=inputs,
-                        context=user_info,
-                    )
-                    async for event in result.stream_events():
-                        if not isinstance(event, RawResponsesStreamEvent):
-                            continue
-                        data = event.data
-                        if isinstance(data, ResponseTextDeltaEvent):
-                            print(data.delta, end="", flush=True)
-                        elif isinstance(data, ResponseContentPartDoneEvent):
-                            print("\n")
+    while True:
+            # 各会話のターンは単一のトレースとなります。通常、ユーザーからの各入力は
+            # あなたのアプリへのAPIリクエストとなり、それをtrace()でラップすることができます
+            with trace("Routing example", group_id=conversation_id):
+                result = Runner.run_streamed(
+                    agent,
+                    input=inputs,
+                    context=user_info,
+                )
+                async for event in result.stream_events():
+                    if not isinstance(event, RawResponsesStreamEvent):
+                        continue
+                    data = event.data
+                    if isinstance(data, ResponseTextDeltaEvent):
+                        print(data.delta, end="", flush=True)
+                    elif isinstance(data, ResponseContentPartDoneEvent):
+                        print("\n")
 
-                inputs = result.to_input_list()
-                print("\n")
+            inputs = result.to_input_list()
+            print("\n")
 
-                user_msg = input("更に話したいことがあれば教えて下さい: ")
-                inputs.append({"content": user_msg, "role": "user"})
-                # 都度トリアージに設定し直す
-                #agent = result.current_agent
-                agent = triage_agent
-    except InputGuardrailTripwireTriggered: #####ここでエラーをキャッチできない。。。。。
-        print("ビジネス以外の質問をしていせんか？")
+            user_msg = input("更に話したいことがあれば教えて下さい: ")
+            inputs.append({"content": user_msg, "role": "user"})
+            # 都度トリアージに設定し直す
+            #agent = result.current_agent
+            agent = triage_agent
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from agents import (
 
 import os
 from dotenv import load_dotenv
+from stream_handler import handle_stream_events
 
 # .envファイルを読み込む
 load_dotenv()
@@ -141,41 +142,47 @@ triage_agent = Agent(
 )
 
 async def main():
+    conversation_id = str(uuid.uuid4().hex[:16])
+
     user_info = UserInfo(
-        site_id = "111"
+        site_id="111"
     )
 
     msg = input("今日はBtoBマーケティングの何についてお話しますか？")
     agent = triage_agent
     inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
-    while True:
-            # 各会話のターンは単一のトレースとなります。通常、ユーザーからの各入力は
-            # あなたのアプリへのAPIリクエストとなり、それをtrace()でラップすることができます
-            with trace("Routing example"):
-                result = Runner.run_streamed(
-                    agent,
-                    input=inputs,
-                    context=user_info,
-                )
-                async for event in result.stream_events():
-                    if not isinstance(event, RawResponsesStreamEvent):
-                        continue
-                    data = event.data
-                    if isinstance(data, ResponseTextDeltaEvent):
-                        print(data.delta, end="", flush=True)
-                    elif isinstance(data, ResponseContentPartDoneEvent):
-                        print("\n")
+    try: 
+        while True:
+            try:
+                with trace("Marketing Discussion"):
+                    result = Runner.run_streamed(
+                        agent,
+                        input=inputs,
+                        context=user_info,
+                    )
+                    await handle_stream_events(result)
+                    inputs = result.to_input_list()
 
-            inputs = result.to_input_list()
+            except Exception as e:
+                print(f"\n予期せぬエラーが発生しました: {str(e)}")
+                print("もう一度お試しください。")
+                continue
+
             print("\n")
 
             user_msg = input("更に話したいことがあれば教えて下さい: ")
+            if user_msg.lower() in ['終了', 'exit', 'quit']:
+                print("会話を終了します。ご利用ありがとうございました。")
+                break
+                
             inputs.append({"content": user_msg, "role": "user"})
-            # 都度トリアージに設定し直す
-            #agent = result.current_agent
             agent = triage_agent
 
+    except KeyboardInterrupt:
+        print("\n\nプログラムを終了します。ご利用ありがとうございました。")
+    finally:
+        print("\nセッションを終了しました。")
 
 if __name__ == "__main__":
     asyncio.run(main())

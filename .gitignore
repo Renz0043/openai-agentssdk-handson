@@ -3,3 +3,4 @@ hello_world.py
 querytest.py
 triage_multilanguage.py
 .env
+.venv

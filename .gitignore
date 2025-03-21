@@ -4,3 +4,5 @@ querytest.py
 triage_multilanguage.py
 .env
 .venv
+__pycache__/
+.DS_Store

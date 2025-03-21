@@ -8,11 +8,22 @@ async def handle_stream_events(stream_result):
     Args:
         stream_result: ストリーミング結果オブジェクト
     """
+    response_text = ""
     async for event in stream_result.stream_events():
         if not isinstance(event, RawResponsesStreamEvent):
             continue
         data = event.data
         if isinstance(data, ResponseTextDeltaEvent):
             print(data.delta, end="", flush=True)
+            response_text += data.delta
         elif isinstance(data, ResponseContentPartDoneEvent):
-            print("\n") 
+            print("\n")
+    
+    # デバッグ出力を追加
+    print("\n=== final_outputの内容 ===")
+    print("型:", type(stream_result.final_output))
+    print("値:", stream_result.final_output)
+    print("=====================\n")
+    
+    # 最終的なレスポンスを返す
+    return stream_result.final_output

@@ -1,7 +1,6 @@
 import asyncio
 import uuid
 import pandas as pd
-import json
 from pandasql import sqldf
 from dataclasses import dataclass
 
@@ -80,6 +79,27 @@ async def query_service(wrapper: RunContextWrapper[UserInfo]) -> str:
     # 結果をマークダウン形式で出力
     return result.to_markdown(index=False)
 
+class BusinessTopicOutput(BaseModel):
+    is_business_topic: bool
+    reasoning: str
+
+guardrail_agent = Agent( 
+    name="Guardrail check",
+    instructions="BtoBマーケティングにおけるデータ分析またはSEOに関するノウハウ以外を質問されていないかチェックする。",
+    output_type=BusinessTopicOutput,
+)
+
+@input_guardrail
+async def businessTopic_guardrail( 
+    ctx: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    result = await Runner.run(guardrail_agent, input, context=ctx.context)
+
+    return GuardrailFunctionOutput(
+        output_info=result.final_output, 
+        tripwire_triggered=result.final_output.is_business_topic,
+    )
+
 # エージェントの定義
 dataAnalyst_agent = Agent(
     model="gpt-4o-mini",
@@ -99,31 +119,6 @@ querydata_agent = Agent(
     instructions="あなたは優秀なインフラエンジニアです。自社が運用しているwebサイトのデータをクエリ、加工した結果の表をマークダウン形式ですべて省略せずに出力します。ユーザーの入力からクエリ対象期間の開始日と終了日をyyyy-mm-dd形式で抽出してツールを利用します。",
     tools=[query_data],
     handoffs=[dataAnalyst_agent, content_agent],
-)
-
-class OutputIdentifyDate(BaseModel):
-    is_date: bool
-    date_from: str
-    date_to: str
-    reasoning: str
-
-identify_date_agent = Agent(
-    model="gpt-4o-mini",
-    name="identify_date_agent",
-    instructions="""
-    # 役割
-    ユーザーから、抽出するデータの対象期間を確実にヒアリングする。
-
-    # 解釈
-    - ユーザーは基本的に、最も新しい年のデータを要求するが、指定があればこの限りではない。
-    - ユーザーの入力にはゆらぎが発生することを考慮する。以下には2月を指定する例を示す。:[2月, 02, feb]
-    - ユーザーの入力を下に、ヒアリングすべき内容に落とし込んで特定できない場合、ユーザーが意図している内容をreasoningに含めてユーザーに確認する。
-    
-    ## ヒアリングすべき内容
-    - クエリの開始日。yyyy-mm-dd形式。
-    - クエリの終了日。yyyy-mm-dd形式。
-    """,
-    output_type=OutputIdentifyDate
 )
 
 triage_agent = Agent(
@@ -146,74 +141,6 @@ triage_agent = Agent(
     handoffs=[dataAnalyst_agent, content_agent, querydata_agent],
 )
 
-
-
-
-## クエリ日付特定フェーズ -----------------------
-async def identifyQueryDate(inputs: list[TResponseInputItem]) -> dict:
-    result = Runner.run_streamed(
-        identify_date_agent,
-        inputs,
-    )
-    response = await handle_stream_events(result)
-    
-    if response is None:
-        raise ValueError("レスポンスが取得できませんでした")
-
-    # responseの型に応じて適切に処理
-    if isinstance(response, str):
-        try:
-            response_json = json.loads(response)
-        except json.JSONDecodeError:
-            raise ValueError("JSONのパースに失敗しました")
-    else:
-        response_json = response
-
-    
-    if response_json.is_date:
-        # date_fromとdate_toの値を確認
-        if response_json.date_from and response_json.date_to:
-            print(f"推定された期間: {response_json.date_from} から {response_json.date_to}")
-            user_confirm = input("この期間でよろしいですか？ (y/n): ")
-            if user_confirm.lower() == 'y':
-                print("日付の推定に成功しました。")
-                return response_json
-            else:
-                print("日付の推定に失敗しました。")
-                print(response_json.reasoning)
-                new_input = input("日付を正しい形式で入力してください（例：2024-02-01）: ")
-                inputs.append({"content": new_input, "role": "user"})
-                return await identifyQueryDate(inputs)
-        else:
-            print("日付の推定に失敗しました。")
-            print(response_json.reasoning)
-            new_input = input("日付を正しい形式で入力してください（例：2024-02-01）: ")
-            inputs.append({"content": new_input, "role": "user"})
-            return await identifyQueryDate(inputs)
-    else:
-        print("日付の推定に失敗しました。")
-        print(response_json.reasoning)
-        new_input = input("日付を正しい形式で入力してください（例：2024-02-01）: ")
-        inputs.append({"content": new_input, "role": "user"})
-        return await identifyQueryDate(inputs)
-
-## -----------------------------------------
-
-## サイト情報抽出フェーズ -----------------------
-
-## -----------------------------------------
-
-## データ抽出フェーズ -----------------------
-
-## -----------------------------------------
-
-## レポーティングフェーズ -----------------------
-
-## -----------------------------------------
-
-
-
-
 async def main():
     conversation_id = str(uuid.uuid4().hex[:16])
 
@@ -225,38 +152,37 @@ async def main():
     agent = triage_agent
     inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
-    try:
-        with trace("Marketing Discussion"):
-            ## クエリ日付特定フェーズ -----------------------
+    try: 
+        while True:
             try:
-                query_result = await identifyQueryDate(inputs)
-                # デバッグ出力
-                print(f"クエリ日付特定フェーズの結果: {query_result}")
-                date_from = query_result.date_from
-                date_to = query_result.date_to
+                with trace("Marketing Discussion"):
+                    result = Runner.run_streamed(
+                        agent,
+                        input=inputs,
+                        context=user_info,
+                    )
+                    await handle_stream_events(result)
+                    inputs = result.to_input_list()
 
-            except ValueError as e:
-                print(f"クエリ日付特定時にエラーが発生しました: {str(e)}")
-            ## -----------------------------------------
+            except Exception as e:
+                print(f"\n予期せぬエラーが発生しました: {str(e)}")
+                print("もう一度お試しください。")
+                continue
 
-            ## サイト情報抽出フェーズ -----------------------
-            
-            ## -----------------------------------------
+            print("\n")
 
-            ## データ抽出フェーズ -----------------------
+            user_msg = input("更に話したいことがあれば教えて下さい: ")
+            if user_msg.lower() in ['終了', 'exit', 'quit']:
+                print("会話を終了します。ご利用ありがとうございました。")
+                break
+                
+            inputs.append({"content": user_msg, "role": "user"})
+            agent = triage_agent
 
-            ## -----------------------------------------
-
-            ## レポーティングフェーズ -----------------------
-            
-            ## -----------------------------------------
-
-    except Exception as e:
-        print(f"\n予期せぬエラーが発生しました: {str(e)}")
-        print("もう一度お試しください。")
-
+    except KeyboardInterrupt:
+        print("\n\nプログラムを終了します。ご利用ありがとうございました。")
+    finally:
+        print("\nセッションを終了しました。")
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-

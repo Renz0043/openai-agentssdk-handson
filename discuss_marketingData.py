@@ -345,7 +345,16 @@ async def identifyQueryDate(inputs: list[TResponseInputItem], wrapper: RunContex
 ## サイト情報抽出フェーズ -----------------------
 async def QueryServiceInfo(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo]) -> dict:
     # サイト情報を抽出する指示を追加
-    query_service_instruction = "site_idにもとづくサービス情報のクエリをお願いします。site_id:" + wrapper.site_id
+    query_service_instruction = f"""
+    # 指示
+    site_idにもとづくサービス情報のクエリをお願いします。
+
+    # site_id
+    site_id: {wrapper.site_id}
+
+    # 留意事項
+    - 出力は、サービス情報のみを回答することとし、site_idに関する内容は回答に含めないこととします。
+    """
     # サイト情報を抽出する指示をinputsに追加
     inputs.append({"content": query_service_instruction, "role": "user"})
     # サイト情報を抽出する指示を渡して実行
@@ -442,7 +451,6 @@ async def ReportingData(inputs: list[TResponseInputItem], wrapper: RunContextWra
 
     return result
 ## -----------------------------------------
-
 
 async def main():
     conversation_id = str(uuid.uuid4().hex[:16])

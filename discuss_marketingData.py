@@ -449,10 +449,6 @@ async def identifyQueryDate(inputs: list[TResponseInputItem], wrapper: RunContex
         ValueError: レスポンスの取得やパースに失敗した場合
     """
     try:
-        # 現在の日付をコンテキストとして追加
-        date_context = f"現在の日付は {wrapper.execution_date} です。"
-        inputs.append({"content": date_context, "role": "system"})
-        
         # エージェントを実行
         result = Runner.run_streamed(identify_date_agent, inputs)
         response = await handle_stream_events(result, show_raw_response=False)  # 生のレスポンスを表示しないようにする
@@ -766,6 +762,10 @@ async def main():
 
     # 実行時の日付を取得
     current_date = datetime.now().strftime("%Y-%m-%d")
+
+    # 現在の日付をコンテキストとして追加
+    date_context = f"現在の日付は {current_date} です。"
+    inputs.append({"content": date_context, "role": "user"})
 
     # ユーザー情報の初期化
     # site_idは仮の値"111"を設定

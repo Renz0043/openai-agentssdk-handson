@@ -763,9 +763,10 @@ async def main():
     # 実行時の日付を取得
     current_date = datetime.now().strftime("%Y-%m-%d")
 
+    # 会話履歴の初期化 - ユーザーからの最初の入力を追加
     # 現在の日付をコンテキストとして追加
     date_context = f"現在の日付は {current_date} です。"
-    inputs.append({"content": date_context, "role": "user"})
+    inputs: list[TResponseInputItem] = [{"content": date_context, "role": "user"}]
 
     # ユーザー情報の初期化
     # site_idは仮の値"111"を設定
@@ -785,8 +786,7 @@ async def main():
             msg = input("Webサイトのレポーティングを開始します。どの期間のデータをもとにレポーティングしますか？")
             # トリアージエージェントを使用して会話を開始
             agent = triage_agent
-            # 会話履歴の初期化 - ユーザーからの最初の入力を追加
-            inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+
             try:
                 query_date_result = await identifyQueryDate(inputs, user_info)
                 

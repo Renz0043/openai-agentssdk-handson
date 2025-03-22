@@ -6,3 +6,4 @@ triage_multilanguage.py
 .venv
 __pycache__/
 .DS_Store
+.python-version

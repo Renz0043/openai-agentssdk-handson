@@ -44,6 +44,7 @@ set_default_openai_key(OPENAI_API_KEY)
 @dataclass
 class UserInfo:  
     site_id: str = Field(description="サイトを特定する一意の文字列")
+    service_info: str = Field(default="", description="サイトのサービス情報")
 
 @function_tool
 async def query_data(date_range_from: str, date_range_to: str) -> str:
@@ -64,7 +65,7 @@ async def query_data(date_range_from: str, date_range_to: str) -> str:
     return result.to_markdown(index=False)
 
 @function_tool
-async def query_service(wrapper: RunContextWrapper[UserInfo]) -> str:
+async def query_service(site_id: str) -> str:
     """
     引数で渡されたコンテキストをもとに、サイト情報を抽出するツール。
     Args: 
@@ -74,7 +75,7 @@ async def query_service(wrapper: RunContextWrapper[UserInfo]) -> str:
     df = pd.read_csv('site_data.csv')
 
     # 日付でクエリを実行（例として '2025/01/01' で絞り込み）
-    query = f"SELECT service, overview FROM df WHERE site_id = {wrapper.context.site_id}"
+    query = f"SELECT service, overview FROM df WHERE site_id = {site_id}"
     result = sqldf(query, locals())
 
     # 結果をマークダウン形式で出力
@@ -200,11 +201,47 @@ async def identifyQueryDate(inputs: list[TResponseInputItem]) -> dict:
 ## -----------------------------------------
 
 ## サイト情報抽出フェーズ -----------------------
+async def QueryServiceInfo(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo]) -> dict:
+    # サイト情報を抽出する指示を追加
+    query_service_instruction = "site_idにもとづくサービス情報のクエリをお願いします。site_id:" + wrapper.site_id
+    # サイト情報を抽出する指示をinputsに追加
+    inputs.append({"content": query_service_instruction, "role": "user"})
+    # サイト情報を抽出する指示を渡して実行
+    response = Runner.run_streamed(
+        triage_agent,
+        query_service_instruction, #無駄なinputsを渡さないため
+    )
+    result = await handle_stream_events(response)
+    
+    if result is None:
+        raise ValueError("レスポンス結果が取得できませんでした")
+    
+    print("---------")
+    print(result)
+    print("---------")
 
+    return result
 ## -----------------------------------------
 
-## データ抽出フェーズ -----------------------
-
+## アクセスデータ抽出フェーズ -----------------------
+async def QueryAccessData(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo], date_from: str, date_to: str) -> dict:
+    # データを抽出する指示を追加
+    query_data_instruction = f"""
+    # 指示
+    データを抽出をお願いします。
+    抽出対象のサイトは、{wrapper.site_id} です。
+    抽出対象の期間は、{date_from} から {date_to} です。
+    """
+    # データを抽出する指示をinputsに追加
+    inputs.append({"content": query_data_instruction, "role": "user"})
+    # データを抽出する指示を渡して実行
+    response = Runner.run_streamed(
+        triage_agent,
+        query_data_instruction, #無駄なinputsを渡さないため
+    )
+    result = await handle_stream_events(response)
+    
+    return result
 ## -----------------------------------------
 
 ## レポーティングフェーズ -----------------------
@@ -218,7 +255,8 @@ async def main():
     conversation_id = str(uuid.uuid4().hex[:16])
 
     user_info = UserInfo(
-        site_id="111"
+        site_id="111",
+        service_info="",
     )
 
     msg = input("今日はBtoBマーケティングの何についてお話しますか？")
@@ -228,23 +266,50 @@ async def main():
     try:
         with trace("Marketing Discussion"):
             ## クエリ日付特定フェーズ -----------------------
+            
             try:
-                query_result = await identifyQueryDate(inputs)
+                query_date_result = await identifyQueryDate(inputs)
                 # デバッグ出力
-                print(f"クエリ日付特定フェーズの結果: {query_result}")
-                date_from = query_result.date_from
-                date_to = query_result.date_to
+                print(f"クエリ日付特定フェーズの結果: {query_date_result}")
+                date_from = query_date_result.date_from
+                date_to = query_date_result.date_to
 
             except ValueError as e:
                 print(f"クエリ日付特定時にエラーが発生しました: {str(e)}")
             ## -----------------------------------------
+            """
 
             ## サイト情報抽出フェーズ -----------------------
-            
+            try:
+                query_service_result = await QueryServiceInfo(inputs, user_info)
+                # デバッグ出力
+                print(f"サイト情報抽出フェーズの結果: {query_service_result}")
+                # サイト情報をinputsに追加
+                inputs.append({"content": query_service_result, "role": "user"})
+                # サイト情報を保存
+                user_info.service_info = query_service_result
+
+            except ValueError as e:
+                print(f"サイト情報抽出時にエラーが発生しました: {str(e)}")
             ## -----------------------------------------
+            """
+            ## アクセスデータ抽出フェーズ -----------------------
+            try:
+                query_access_data_result = await QueryAccessData(inputs, user_info, date_from, date_to)
+                # デバッグ出力
+                print(f"アクセスデータ抽出フェーズの結果: {query_access_data_result}")
+                # アクセスデータをinputsに追加
+                query_access_data_inputs = f"""
+                # 抽出期間
+                抽出対象の期間は、{date_from} から {date_to} です。
+                # 抽出結果
+                {query_access_data_result}
+                """
+                # アクセスデータをinputsに追加
+                inputs.append({"content": query_access_data_inputs, "role": "user"})
 
-            ## データ抽出フェーズ -----------------------
-
+            except ValueError as e:
+                print(f"アクセスデータ抽出時にエラーが発生しました: {str(e)}")
             ## -----------------------------------------
 
             ## レポーティングフェーズ -----------------------

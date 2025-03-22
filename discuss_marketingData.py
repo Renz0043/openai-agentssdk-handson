@@ -740,7 +740,7 @@ async def GenerateReportingData(inputs: list[TResponseInputItem], wrapper: RunCo
 
         # レポート生成を実行
         response = Runner.run_streamed(
-            triage_agent, #あえてハンドオフが見たいのでquerydata_agentでなくtriage_agentに渡す
+            dataAnalyst_agent,
             reporting_instruction,
         )
         # レポート部分はストリーミング表示する

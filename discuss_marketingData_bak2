@@ -1,0 +1,623 @@
+# 標準ライブラリ
+import asyncio
+import json
+import os
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from typing import List
+
+# サードパーティライブラリ
+import pandas as pd
+from dotenv import load_dotenv
+from pandasql import sqldf
+from pydantic import BaseModel, Field
+
+# OpenAI関連
+from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
+from agents import (
+    Agent,
+    FunctionTool,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
+    RawResponsesStreamEvent,
+    RunContextWrapper,
+    Runner,
+    TResponseInputItem,
+    function_tool,
+    input_guardrail,
+    set_default_openai_key,
+    trace
+)
+# 自作モジュール
+from stream_handler import handle_stream_events
+
+# .envファイルを読み込む
+load_dotenv()
+# 環境変数からAPIキーを取得
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+# デフォルトキーとして登録
+set_default_openai_key(OPENAI_API_KEY)
+
+"""
+このサンプルは、ハンドオフ/ルーティングパターンを示しています。トリアージエージェントが最初のメッセージを受け取り、
+その後、リクエストに基づいて適切なエージェントにハンドオフします。応答はユーザーにストリーミングされます。
+
+主な機能:
+- UserInfoクラス: ユーザー情報を保持するデータクラス
+- query_data: 指定された期間のデータを抽出するツール
+- query_service: サイト情報を抽出するツール
+
+使用方法:
+1. 必要な環境変数(.env)を設定
+2. 必要なCSVファイル(landingpage_data.csv, site_data.csv)を配置
+3. エージェントを実行してデータ分析を開始
+
+依存関係:
+- Python 3.7+
+- OpenAI API
+- pandas
+- pandasql
+- pydantic
+- python-dotenv
+
+"""
+
+## ユーザー情報クラス ----------------------------
+@dataclass
+class UserInfo:  
+    execution_date: str = Field(description="実行日")
+    site_id: str = Field(description="サイトを特定する一意の文字列")
+    service_info: str = Field(default="", description="サイトのサービス情報")
+    access_data: str = Field(default="", description="アクセスデータ")
+    report_result: str = Field(default="", description="レポーティングデータ")
+
+## データ抽出ツール ----------------------------
+@function_tool
+async def query_data(date_range_from: str, date_range_to: str, columns: List[str], groupby_columns: List[str] = None) -> str:
+    """
+    引数で渡された期間におけるデータを抽出するツール。
+    
+    Args:
+        columns: List[str] 抽出対象となるカラム名がリスト形式で渡される。
+        date_range_from: 抽出対象となるデータの開始日。yyyy-mm-dd形式で渡される。
+        date_range_to: 抽出対象となるデータの終了日。yyyy-mm-dd形式で渡される。 
+        groupby_columns: List[str] グループ化対象となるカラム名がリスト形式で渡される。省略可能。
+
+    Returns:
+        str: マークダウン形式のデータ
+
+    Raises:
+        FileNotFoundError: CSVファイルが見つからない場合
+        ValueError: 日付形式が不正な場合
+    """
+    try:
+        # 日付形式の検証
+        datetime.strptime(date_range_from, '%Y-%m-%d')
+        datetime.strptime(date_range_to, '%Y-%m-%d')
+        
+        # カラムのバリデーション
+        if not columns:
+            raise ValueError("抽出対象のカラムを指定してください")
+
+        # データを読み込む
+        df = pd.read_csv('landingpage_data.csv')
+        
+        # カラムをカンマ区切りの文字列に変換
+        columns_str = ", ".join(columns)
+
+        # 基本のクエリを構築
+        query = f"SELECT {columns_str} FROM df WHERE date BETWEEN '{date_range_from}' AND '{date_range_to}'"
+        
+        # groupby_columnsが指定されている場合、GROUP BY句を追加
+        if groupby_columns:
+            groupby_str = ", ".join(groupby_columns)
+            query += f" GROUP BY {groupby_str}"
+
+        # クエリ実行
+        result = sqldf(query, locals())
+
+        if result.empty:
+            return "指定された条件に一致するデータが見つかりませんでした。"
+
+        # 結果をマークダウン形式で出力
+        return result.to_markdown(index=False)
+
+    except FileNotFoundError:
+        return "データファイル(landingpage_data.csv)が見つかりません。"
+    except ValueError as e:
+        return f"入力値が不正です: {str(e)}"
+    except Exception as e:
+        return f"予期せぬエラーが発生しました: {str(e)}"
+
+## サイト情報抽出ツール ----------------------------
+@function_tool
+async def query_service(site_id: str) -> str:
+    """
+    引数で渡されたコンテキストをもとに、サイト情報を抽出するツール。
+
+    Args:
+        site_id: サイトを特定する一意の文字列。
+
+    Returns:
+        str: サイト情報をマークダウン形式で返却
+
+    Raises:
+        FileNotFoundError: CSVファイルが見つからない場合
+        ValueError: site_idが不正な場合
+    """
+    try:
+        # site_idのバリデーション
+        if not site_id:
+            raise ValueError("site_idを指定してください")
+
+        # データを読み込む
+        df = pd.read_csv('site_data.csv')
+
+        # シンプルなクエリを実行
+        query = f"SELECT service, overview FROM df WHERE site_id = '{site_id}';"
+        result = sqldf(query, locals())
+
+        if result.empty:
+            return "指定されたsite_idに一致するデータが見つかりませんでした。"
+
+        # 結果をマークダウン形式で出力
+        return result.to_markdown(index=False)
+
+    except FileNotFoundError:
+        return "データファイル(site_data.csv)が見つかりません。"
+    except ValueError as e:
+        return f"入力値が不正です: {str(e)}"
+    except Exception as e:
+        return f"予期せぬエラーが発生しました: {str(e)}"
+
+## エージェントの定義 ----------------------------
+dataAnalyst_agent = Agent(
+    model="gpt-4o-mini",
+    name="dataAnalyst_agent",
+    instructions="あなたは優秀なデータアナリストです。特にBtoBマーケティングにおけるWebサイト運用データの分析に深い知見があります。",
+)
+
+content_agent = Agent(
+    model="gpt-4o-mini",
+    name="content_agent",
+    instructions="あなたは優秀なSEOコンテンツの作成担当です。特にBtoBマーケティングに効果的なコンテンツを作成するための深い知見があります。",
+)
+
+querydata_agent = Agent(
+    model="gpt-4o-mini",
+    name="querydata_agent",
+    instructions="""
+    # 定義
+    あなたは優秀なインフラエンジニアです。
+    自社が運用しているwebサイトのデータをクエリする文章を作成して、抽出結果をマークダウン形式ですべて省略せずに出力します。
+    ユーザーの入力からクエリ対象期間の開始日と終了日(yyyy-mm-dd形式)、対象のカラムを識別してツールを利用します。
+
+    # テーブル
+    | カラム名         | 日本語名             | データ型         | 説明 |
+    |------------------|----------------------|------------------|------|
+    | `date`           | 日付                 | DATE             | データの記録日（例：2025-01-03） |
+    | `ページタイトル` | ページタイトル       | STRING           | Webページのタイトル（例：トップページ） |
+    | `URL`            | URL                  | STRING           | 対象ページのURL |
+    | `訪問数`         | 訪問数               | INTEGER          | 対象ページへの訪問回数 |
+    | `直帰率`         | 直帰率               | STRING (PERCENT) | ページからすぐに離脱したユーザーの割合（例：35%） |
+    | `平均滞在時間`   | 平均滞在時間         | TIME (hh:mm:ss)  | ページに滞在した平均時間（例：0:02:45） |
+    | `CV数`           | コンバージョン数     | INTEGER          | コンバージョンに至った件数 |
+    | `CV率`           | コンバージョン率     | STRING (PERCENT) | コンバージョン率（例：1.67%） |
+
+    # 元のクエリ
+    -- クエリ1: コンバージョン率が高いページTOP5
+    -- ページのコンバージョン率（CV率）が高い順に並べ替え、上位5件を取得します。
+    -- クエリ開始
+    SELECT *
+    FROM df
+    ORDER BY CAST(SUBSTR(CV率, 1, LENGTH(CV率) - 1) AS REAL) DESC
+    LIMIT 5;
+    -- クエリ終了
+
+    -- クエリ2: 平均滞在時間が長いページTOP5
+    -- ユーザーの平均滞在時間が長いページを上位5件取得します。
+    -- クエリ開始
+    SELECT *
+    FROM df
+    ORDER BY
+    CAST(SUBSTR(平均滞在時間, 1, INSTR(平均滞在時間, ':') - 1) AS INTEGER) * 3600 +
+    CAST(SUBSTR(平均滞在時間, INSTR(平均滞在時間, ':') + 1, INSTR(平均滞在時間, ':', -1) - INSTR(平均滞在時間, ':') - 1) AS INTEGER) * 60 +
+    CAST(SUBSTR(平均滞在時間, INSTR(平均滞在時間, ':', -1) + 1) AS INTEGER) DESC
+    LIMIT 5;
+    -- クエリ終了
+
+    -- クエリ3: 訪問数が多いページTOP5（人気ページの特定）
+    -- 訪問数が多いページを上位5件取得し、人気のあるページを特定します。
+    -- クエリ開始
+    SELECT *
+    FROM df
+    ORDER BY 訪問数 DESC
+    LIMIT 5;
+    -- クエリ終了
+
+    -- クエリ4: ページ単位のCV率・訪問数・直帰率を集計（日付なし）
+    -- ページごとに訪問数の合計、直帰率の平均、CV率の平均を集計します。
+    -- クエリ開始
+    SELECT ページタイトル,
+        SUM(訪問数) AS 訪問数合計,
+        AVG(CAST(SUBSTR(直帰率, 1, LENGTH(直帰率) - 1) AS REAL)) AS 平均直帰率,
+        AVG(CAST(SUBSTR(CV率, 1, LENGTH(CV率) - 1) AS REAL)) AS 平均CV率
+    FROM df
+    GROUP BY ページタイトル;
+    -- クエリ終了
+
+    -- クエリ5: 日別CV数の推移
+    -- 日ごとのコンバージョン数（CV数）の推移を確認します。
+    -- クエリ開始
+    SELECT date, SUM(CV数) AS 日別CV数
+    FROM df
+    GROUP BY date
+    ORDER BY date;
+    -- クエリ終了
+
+    -- クエリ6: CV数と訪問数の相関チェック（散布図用）
+    -- 訪問数とCV数の関係性を確認するためのデータを取得します。
+    -- クエリ開始
+    SELECT 訪問数, CV数 FROM df;
+    -- クエリ終了
+
+    -- クエリ7: CV率が平均より高いページの抽出
+    -- 全体の平均CV率より高いページを抽出します。
+    -- クエリ開始
+    SELECT *
+    FROM df
+    WHERE CAST(SUBSTR(CV率, 1, LENGTH(CV率) - 1) AS REAL) >
+        (SELECT AVG(CAST(SUBSTR(CV率, 1, LENGTH(CV率) - 1) AS REAL)) FROM df);
+    -- クエリ終了
+
+    -- クエリ8: 直帰率が高すぎるページの特定（例：50%以上）
+    -- 直帰率が50%以上のページを特定し、改善の必要があるページを洗い出します。
+    -- クエリ開始
+    SELECT *
+    FROM df
+    WHERE CAST(SUBSTR(直帰率, 1, LENGTH(直帰率) - 1) AS REAL) >= 50;
+    -- クエリ終了
+
+    -- クエリ9: ページごとのCV数合計と訪問数合計
+    -- ページごとに訪問数とCV数の合計を集計し、CV数の多い順に並べ替えます。
+    -- クエリ開始
+    SELECT ページタイトル, SUM(訪問数) AS 訪問数合計, SUM(CV数) AS CV数合計
+    FROM df
+    GROUP BY ページタイトル
+    ORDER BY CV数合計 DESC;
+    -- クエリ終了
+
+    -- クエリ10: ページごとの平均滞在時間が長い順（人気・エンゲージメント測定）
+    -- ページごとの平均滞在時間を秒単位で計算し、長い順に並べ替えます。
+    -- クエリ開始
+    SELECT ページタイトル,
+        AVG(
+            CAST(SUBSTR(平均滞在時間, 1, INSTR(平均滞在時間, ':') - 1) AS INTEGER) * 3600 +
+            CAST(SUBSTR(平均滞在時間, INSTR(平均滞在時間, ':') + 1, INSTR(平均滞在時間, ':', -1) - INSTR(平均滞在時間, ':') - 1) AS INTEGER) * 60 +
+            CAST(SUBSTR(平均滞在時間, INSTR(平均滞在時間, ':', -1) + 1) AS INTEGER)
+        ) AS 平均滞在時間秒
+    FROM df
+    GROUP BY ページタイトル
+    ORDER BY 平均滞在時間秒 DESC;
+    -- クエリ終了
+
+    # 回答ガイドライン
+    1. 提供されたコンテキストが十分であれば、質問に対する有効なクエリを説明なしで生成してください。クエリは、質問内容を含むコメントから始めてください。
+    2. 提供されたコンテキストが不十分な場合、なぜクエリを生成できないのかを説明してください。
+    
+    """,
+    tools=[query_data],
+    handoffs=[dataAnalyst_agent, content_agent],
+)
+
+class OutputIdentifyDate(BaseModel):
+    is_date: bool
+    date_from: str
+    date_to: str
+    reasoning: str
+
+identify_date_agent = Agent(
+    model="gpt-4o-mini",
+    name="identify_date_agent",
+    instructions="""
+    # 役割
+    ユーザーから、抽出するデータの対象期間を確実にヒアリングする。
+
+    # 解釈
+    - ユーザーは基本的に、最も新しい年のデータを要求するが、指定があればこの限りではない。
+    - ユーザーの入力にはゆらぎが発生することを考慮する。以下には2月を指定する例を示す。:[2月, 02, feb]
+    - ユーザーの入力を下に、ヒアリングすべき内容に落とし込んで特定できない場合、ユーザーが意図している内容をreasoningに含めてユーザーに確認する。
+    
+    ## ヒアリングすべき内容
+    - クエリの開始日。yyyy-mm-dd形式。
+    - クエリの終了日。yyyy-mm-dd形式。
+    """,
+    output_type=OutputIdentifyDate
+)
+
+triage_agent = Agent(
+    model="gpt-4o-mini",
+    name="triage_agent",
+    instructions="""
+    # 役割
+    ユーザーからの内容に対して、適切なエージェントにハンドオフする。
+
+    # ハンドオフポリシー
+    ## ハンドオフせずに、自身で実行すべきタスク
+    - site_idにもとづくサービス情報のクエリ
+    ## ハンドオフすべきタスクとそのターゲット
+    ### データの抽出
+    - データの抽出が必要な場合はquerydata_agentへハンドオフする。この場合は以下のデータの開始日と終了日がyyyy-mm-dd形式で判別できるまでユーザーに質問する。
+    - 
+    ### コンテンツの作成
+    - SEOコンテンツに関する話題ははcontent_agentへハンドオフする。
+    ### データの分析やレポートティング
+    - データの分析やレポートティングはdataAnalyst_agentへハンドオフする。
+
+    """,
+    tools=[query_service],
+    handoffs=[dataAnalyst_agent, content_agent, querydata_agent],
+)
+
+
+
+
+## クエリ日付特定フェーズ -----------------------
+async def identifyQueryDate(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo]) -> dict:
+    # 現在の日付を取得
+    date_context = f"現在の日付は {wrapper.execution_date} です。"
+    inputs.append({"content": date_context, "role": "system"})
+    result = Runner.run_streamed(
+        identify_date_agent,
+        inputs,
+    )
+    response = await handle_stream_events(result)
+    
+    if response is None:
+        raise ValueError("レスポンスが取得できませんでした")
+
+    # responseの型に応じて適切に処理
+    if isinstance(response, str):
+        try:
+            response_json = json.loads(response)
+        except json.JSONDecodeError:
+            raise ValueError("JSONのパースに失敗しました")
+    else:
+        response_json = response
+
+    
+    if response_json.is_date:
+        # date_fromとdate_toの値を確認
+        if response_json.date_from and response_json.date_to:
+            print(f"推定された期間: {response_json.date_from} から {response_json.date_to}")
+            user_confirm = input("この期間でよろしいですか？ (y/n): ")
+            if user_confirm.lower() == 'y':
+                print("日付の推定に成功しました。")
+                return response_json
+            else:
+                print("日付の推定に失敗しました。")
+                print(response_json.reasoning)
+                new_input = input("日付を正しい形式で入力してください（例：2024-02-01）: ")
+                inputs.append({"content": new_input, "role": "user"})
+                return await identifyQueryDate(inputs)
+        else:
+            print("日付の推定に失敗しました。")
+            print(response_json.reasoning)
+            new_input = input("日付を正しい形式で入力してください（例：2024-02-01）: ")
+            inputs.append({"content": new_input, "role": "user"})
+            return await identifyQueryDate(inputs)
+    else:
+        print("日付の推定に失敗しました。")
+        print(response_json.reasoning)
+        new_input = input("日付を正しい形式で入力してください（例：2024-02-01）: ")
+        inputs.append({"content": new_input, "role": "user"})
+        return await identifyQueryDate(inputs)
+
+## -----------------------------------------
+
+## サイト情報抽出フェーズ -----------------------
+async def QueryServiceInfo(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo]) -> dict:
+    # サイト情報を抽出する指示を追加
+    query_service_instruction = f"""
+    # 指示
+    site_idにもとづくサービス情報のクエリをお願いします。
+
+    # site_id
+    site_id: {wrapper.site_id}
+
+    # 留意事項
+    - 出力は、サービス情報のみを回答することとし、site_idに関する内容は回答に含めないこととします。
+    """
+    # サイト情報を抽出する指示をinputsに追加
+    inputs.append({"content": query_service_instruction, "role": "user"})
+    # サイト情報を抽出する指示を渡して実行
+    response = Runner.run_streamed(
+        triage_agent,
+        query_service_instruction, #無駄なinputsを渡さないため
+    )
+    result = await handle_stream_events(response)
+    
+    if result is None:
+        raise ValueError("レスポンス結果が取得できませんでした")
+    
+    # デバッグ出力
+    # print("---------")
+    # print(result)
+    # print("---------")
+
+    return result
+## -----------------------------------------
+
+## アクセスデータ抽出フェーズ -----------------------
+class OutputAccessData(BaseModel):
+    columns: List[str]
+    reasoning: str
+
+async def QueryAccessData(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo], date_from: str, date_to: str, request_text: str) -> dict: 
+    # データを抽出する指示を追加    
+    query_data_instruction = f"""
+    # 指示
+    データを抽出をお願いします。また抽出時に利用したクエリに併記して。
+    抽出対象のサイトは、{wrapper.site_id} です。
+    抽出対象の期間は、{date_from} から {date_to} です。
+
+    # 抽出カラム
+    - ユーザーの入力から抽出対象のカラムを特定してください。なおユーザーの入力は、カラム一覧の中から選択していることを前提とします。
+    - 出力は基本的にディメンションの値でグループ化することとします。
+    - ディメンションの値は、date、ページタイトル、URLの中から選択してください。
+
+    ## カラム一覧
+    - date
+    - ページタイトル
+    - URL
+    - 訪問数
+    - 直帰率
+    - 平均滞在時間
+    - CV数
+    - CV率
+    
+    # ユーザーの入力
+    {request_text}
+    """
+    # データを抽出する指示をinputsに追加
+    inputs.append({"content": query_data_instruction, "role": "user"})
+    # データを抽出する指示を渡して実行
+    response = Runner.run_streamed(
+        triage_agent, #あえてハンドオフが見たいのでquerydata_agentでなくtriage_agentに渡す
+        query_data_instruction, #無駄なinputsを渡さないため
+    )
+    result = await handle_stream_events(response)
+    
+    if result is None:
+        raise ValueError("レスポンス結果が取得できませんでした")
+    
+    # responseの型に応じて適切に処理
+    return result
+## -----------------------------------------
+
+## レポーティングフェーズ -----------------------
+async def ReportingData(inputs: list[TResponseInputItem], wrapper: RunContextWrapper[UserInfo], date_from: str, date_to: str) -> str:
+    # レポーティングデータを生成する指示を追加
+    reporting_instruction = f"""
+    # 指示
+    以下の情報から、Webサイトのレポーティングをお願いします。
+
+    # コンテキスト
+    ## サイトのサービス情報
+    {wrapper.service_info}
+    ## アクセスデータ
+    {wrapper.access_data}
+    ## アクセスデータのクエリ期間
+    {date_from} から {date_to} です。
+    """
+    # レポーティングデータを生成する指示をinputsに追加
+    inputs.append({"content": reporting_instruction, "role": "user"})
+    # レポーティングデータを生成する指示を渡して実行
+    response = Runner.run_streamed(
+        triage_agent, #あえてハンドオフが見たいのでquerydata_agentでなくtriage_agentに渡す
+        reporting_instruction, #無駄なinputsを渡さないため
+    )
+    result = await handle_stream_events(response)
+    
+    if result is None:
+        raise ValueError("レスポンス結果が取得できませんでした")
+
+    return result
+## -----------------------------------------
+
+async def main():
+    conversation_id = str(uuid.uuid4().hex[:16])
+
+    # 現在の日付を取得
+    current_date = datetime.now().strftime("%Y-%m-%d")
+
+    user_info = UserInfo(
+        execution_date=current_date,
+        site_id="111",
+        service_info="",
+        access_data="",
+        report_result="",
+    )
+
+    msg = input("Webサイトのレポーティングを開始します。どの機関のデータをもとにレポーティングしますか？")
+    agent = triage_agent
+    inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+
+    try:
+        with trace("Marketing Discussion"):
+            ## クエリ日付特定フェーズ -----------------------
+            
+            try:
+                query_date_result = await identifyQueryDate(inputs, user_info)
+                # デバッグ出力
+                # print(f"クエリ日付特定フェーズの結果: {query_date_result}")
+                date_from = query_date_result.date_from
+                date_to = query_date_result.date_to
+
+            except ValueError as e:
+                print(f"クエリ日付特定時にエラーが発生しました: {str(e)}")
+            ## -----------------------------------------
+            
+            ## サイト情報抽出フェーズ -----------------------
+            try:
+                query_service_result = await QueryServiceInfo(inputs, user_info)
+                # デバッグ出力
+                # print(f"サイト情報抽出フェーズの結果: {query_service_result}")
+                # サイト情報をinputsに追加
+                inputs.append({"content": query_service_result, "role": "user"})
+                # サイト情報を保存
+                user_info.service_info = query_service_result
+
+            except ValueError as e:
+                print(f"サイト情報抽出時にエラーが発生しました: {str(e)}")
+            ## -----------------------------------------
+            
+            ## アクセスデータ抽出フェーズ -----------------------
+            try:
+
+                # 抽出カラムを入力
+                request_text = input("抽出したいカラムを入力してください。\nカラム一覧: 日付、ページタイトル、URL,訪問数、直帰率、平均滞在時間、CV数、CV率\n：")
+                query_access_data_result = await QueryAccessData(inputs, user_info, date_from, date_to, request_text)
+
+                # デバッグ出力
+                #print(f"アクセスデータ抽出フェーズの結果: {query_access_data_result}")
+                # アクセスデータをinputsに追加
+                query_access_data_inputs = f"""
+                # 抽出期間
+                抽出対象の期間は、{date_from} から {date_to} です。
+                # 抽出結果
+                {query_access_data_result}
+                """
+                # アクセスデータをinputsに追加
+                inputs.append({"content": query_access_data_inputs, "role": "user"})
+                # アクセスデータを保存
+                user_info.access_data = query_access_data_result
+
+            except ValueError as e:
+                print(f"アクセスデータ抽出時にエラーが発生しました: {str(e)}")
+            ## -----------------------------------------
+
+            ## レポーティングフェーズ -----------------------
+            try:
+                report_result = await ReportingData(inputs, user_info, date_from, date_to)
+                # デバッグ出力
+                #print(f"レポーティングフェーズの結果: {report_result}")
+                # レポーティングデータをinputsに追加
+                inputs.append({"content": report_result, "role": "user"})
+                # レポーティングデータを保存
+                user_info.report_result = report_result
+
+            except ValueError as e:
+                print(f"レポーティング時にエラーが発生しました: {str(e)}")
+            ## -----------------------------------------
+
+    except Exception as e:
+        print(f"\n予期せぬエラーが発生しました: {str(e)}")
+        print("もう一度お試しください。")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+

@@ -454,7 +454,7 @@ async def identifyQueryDate(inputs: list[TResponseInputItem], wrapper: RunContex
         response = await handle_stream_events(result, show_raw_response=False)  # 生のレスポンスを表示しないようにする
         
         if not response:
-            raise ValueError("レスポンスが取得できませんでした")
+            raise ValueError("> System: レスポンスが取得できませんでした")
 
         # レスポンスをパース
         response_json = (
@@ -463,22 +463,22 @@ async def identifyQueryDate(inputs: list[TResponseInputItem], wrapper: RunContex
         
         # 日付が特定できた場合
         if response_json.date_from and response_json.date_to:
-            print(f"推定された期間: {response_json.date_from} から {response_json.date_to}")
+            print(f"> AI: 推定された期間: {response_json.date_from} から {response_json.date_to}")
             
-            if input("この期間でよろしいですか？ (y/n): ").lower() == 'y':
-                print("日付の推定に成功しました。利用可能なカラムをロードしています...")
+            if input("> AI: この期間でよろしいですか？ (y/n): ").lower() == 'y':
+                print("> AI: 日付の推定に成功しました。利用可能なカラムをロードしています...")
                 return response_json
                 
         # 日付の再入力を要求
-        print("日付の推定に失敗しました。")            
-        new_input = input("再度分析期間を入力してください（例：2025-02-01から2025-02-28）: ")
+        print("> AI: 日付の推定に失敗しました。")            
+        new_input = input("> AI: 再度分析期間を入力してください（例：2025-02-01から2025-02-28）: ")
         inputs.append({"content": new_input, "role": "user"})
         return await identifyQueryDate(inputs, wrapper)
         
     except json.JSONDecodeError:
-        raise ValueError("JSONのパースに失敗しました") 
+        raise ValueError("> System: JSONのパースに失敗しました") 
     except Exception as e:
-        raise ValueError(f"予期せぬエラーが発生しました: {str(e)}")
+        raise ValueError(f"> System: 予期せぬエラーが発生しました: {str(e)}")
 
 ## -----------------------------------------
 
@@ -783,33 +783,33 @@ async def main():
         with trace("Marketing Discussion"):
             ## クエリ日付特定フェーズ -----------------------
             # ユーザーからレポート対象期間を取得
-            msg = input("Webサイトのレポーティングを開始します。どの期間のデータをもとにレポーティングしますか？")
-            # トリアージエージェントを使用して会話を開始
-            agent = triage_agent
+            msg = input("> AI: Webサイトのレポーティングを開始します。どの期間のデータをもとにレポーティングしますか？\n> ユーザー: ")
+            # ユーザーの入力を会話履歴に追加
+            inputs.append({"content": msg, "role": "user"})
 
             try:
                 query_date_result = await identifyQueryDate(inputs, user_info)
                 
                 # 日付が取得できなかった場合は処理を終了
                 if not query_date_result:
-                    raise ValueError("日付の取得に失敗しました")
+                    raise ValueError("> System: 日付の取得に失敗しました")
                 
                 # 日付のバリデーション
                 try:
                     datetime.strptime(query_date_result.date_from, '%Y-%m-%d')
                     datetime.strptime(query_date_result.date_to, '%Y-%m-%d')
                 except ValueError:
-                    raise ValueError("不正な日付形式です")
+                    raise ValueError("> System: 不正な日付形式です")
                 
                 # 開始日が終了日より後の場合はエラー
                 if query_date_result.date_from > query_date_result.date_to:
-                    raise ValueError("開始日が終了日より後の日付になっています")
+                    raise ValueError("> System: 開始日が終了日より後の日付になっています")
                     
                 date_from = query_date_result.date_from
                 date_to = query_date_result.date_to
 
             except ValueError as e:
-                print(f"クエリ日付特定時にエラーが発生しました: {str(e)}")
+                print(f"> System: クエリ日付特定時にエラーが発生しました: {str(e)}")
             ## -----------------------------------------
             
             ## サイト情報抽出フェーズ -----------------------
@@ -820,7 +820,7 @@ async def main():
                 
                 # サイト情報が取得できなかった場合は処理を終了
                 if not query_service_result:
-                    raise ValueError("サイト情報の取得に失敗しました")
+                    raise ValueError("> System: サイト情報の取得に失敗しました")
                 
                 # サイト情報をinputsに追加
                 inputs.append({"content": query_service_result, "role": "user"})
@@ -828,7 +828,7 @@ async def main():
                 user_info.service_info = query_service_result
 
             except ValueError as e:
-                print(f"サイト情報抽出時にエラーが発生しました: {str(e)}")
+                print(f"> System: サイト情報抽出時にエラーが発生しました: {str(e)}")
             ## -----------------------------------------
             
             ## アクセスデータ抽出フェーズ -----------------------
@@ -849,7 +849,7 @@ async def main():
                 
                 # 入力値の検証
                 if not request_text.strip():
-                    raise ValueError("データ項目が入力されていません")
+                    raise ValueError("> System: データ項目が入力されていません")
 
                 # アクセスデータを抽出（ユーザー確認機能付き）
                 query_access_data_result = await QueryAccessData(inputs, user_info, date_from, date_to, request_text)
@@ -868,7 +868,7 @@ async def main():
                 user_info.access_data = query_access_data_result
 
             except ValueError as e:
-                print(f"\nエラー: アクセスデータの抽出に失敗しました")
+                print(f"\n> System: アクセスデータの抽出に失敗しました")
                 print(f"理由: {str(e)}")
                 print("入力内容を確認して再度お試しください")
             ## -----------------------------------------
@@ -880,7 +880,7 @@ async def main():
                 report_result = await GenerateReportingData(inputs, user_info, date_from, date_to)
 
                 if not report_result:
-                    raise ValueError("レポートの生成に失敗しました")
+                    raise ValueError("> System: レポートの生成に失敗しました")
 
                 # レポーティングデータをコンテキストに追加
                 reporting_context = f"""
@@ -897,13 +897,13 @@ async def main():
                 print("========================\n")
 
             except ValueError as e:
-                print(f"\nエラー: レポート生成に失敗しました")
+                print(f"\n> System: レポート生成に失敗しました")
                 print(f"理由: {str(e)}")
                 print("入力内容を確認して再度お試しください")
             ## -----------------------------------------
 
     except Exception as e:
-        print(f"\n予期せぬエラーが発生しました: {str(e)}")
+        print(f"\n> System: 予期せぬエラーが発生しました: {str(e)}")    
         print("もう一度お試しください。")
         return
 
